@@ -32,6 +32,7 @@
 #include "hwc_utils.h"
 #include "hwc_fbupdate.h"
 #include "hwc_mdpcomp.h"
+#include "hwc_dump_layers.h"
 #include "external.h"
 #include "hwc_copybit.h"
 #include "profiler.h"
@@ -192,11 +193,14 @@ static int hwc_prepare_external(hwc_composer_device_1 *dev,
                 }
             }
         } else {
-            // External Display is in Pause state.
-            // ToDo:
-            // Mark all application layers as OVERLAY so that
-            // GPU will not compose. This is done for power
-            // optimization
+            /* External Display is in Pause state.
+             * Mark all application layers as OVERLAY so that
+             * GPU will not compose.
+             */
+            for(size_t i = 0 ;i < (size_t)(list->numHwLayers - 1); i++) {
+                hwc_layer_1_t *layer = &list->hwLayers[i];
+                layer->compositionType = HWC_OVERLAY;
+            }
         }
     }
     return 0;
@@ -229,11 +233,14 @@ static int hwc_prepare_virtual(hwc_composer_device_1 *dev,
                 }
             }
         } else {
-            // Virtual Display is in Pause state.
-            // ToDo:
-            // Mark all application layers as OVERLAY so that
-            // GPU will not compose. This is done for power
-            // optimization
+            /* Virtual Display is in Pause state.
+             * Mark all application layers as OVERLAY so that
+             * GPU will not compose.
+             */
+            for(size_t i = 0 ;i < (size_t)(list->numHwLayers - 1); i++) {
+                hwc_layer_1_t *layer = &list->hwLayers[i];
+                layer->compositionType = HWC_OVERLAY;
+            }
         }
     }
     return 0;
@@ -492,6 +499,9 @@ static int hwc_set_primary(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
         if(list->numHwLayers > 1)
             hwc_sync(ctx, list, dpy, fd);
 
+        // Dump the layers for primary
+        if(ctx->mHwcDebug[dpy])
+            ctx->mHwcDebug[dpy]->dumpLayers(list);
 
         if (!ctx->mMDPComp[dpy]->draw(ctx, list)) {
             ALOGE("%s: MDPComp draw failed", __FUNCTION__);
@@ -544,6 +554,9 @@ static int hwc_set_external(hwc_context_t *ctx,
         if(list->numHwLayers > 1)
             hwc_sync(ctx, list, dpy, fd);
 
+        // Dump the layers for external
+        if(ctx->mHwcDebug[dpy])
+            ctx->mHwcDebug[dpy]->dumpLayers(list);
 
         if (!ctx->mMDPComp[dpy]->draw(ctx, list)) {
             ALOGE("%s: MDPComp draw failed", __FUNCTION__);
