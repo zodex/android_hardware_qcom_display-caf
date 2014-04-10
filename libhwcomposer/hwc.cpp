@@ -103,7 +103,6 @@ static void hwc_registerProcs(struct hwc_composer_device_1* dev,
 //Helper
 static void reset(hwc_context_t *ctx, int numDisplays,
                   hwc_display_contents_1_t** displays) {
-    ctx->isPaddingRound = false;
     memset(ctx->listStats, 0, sizeof(ctx->listStats));
     for(int i = 0; i < HWC_NUM_DISPLAY_TYPES; i++) {
         hwc_display_contents_1_t *list = displays[i];
@@ -111,22 +110,11 @@ static void reset(hwc_context_t *ctx, int numDisplays,
         // value is reset on every prepare. However, for the layer
         // cache we need to reset it.
         // We can probably rethink that later on
-        if (LIKELY(list && list->numHwLayers > 0)) {
+        if (LIKELY(list && list->numHwLayers > 1)) {
             for(uint32_t j = 0; j < list->numHwLayers; j++) {
                 if(list->hwLayers[j].compositionType != HWC_FRAMEBUFFER_TARGET)
                     list->hwLayers[j].compositionType = HWC_FRAMEBUFFER;
             }
-
-            if((ctx->mPrevHwLayerCount[i] == 1) and (list->numHwLayers > 1)) {
-                /* If the previous cycle for dpy 'i' has 0 AppLayers and the
-                 * current cycle has atleast 1 AppLayer, padding round needs
-                 * to be invoked on current cycle to free up the resources.
-                 */
-                ctx->isPaddingRound = true;
-            }
-            ctx->mPrevHwLayerCount[i] = list->numHwLayers;
-        } else {
-            ctx->mPrevHwLayerCount[i] = 0;
         }
 
         if(ctx->mFBUpdate[i])
@@ -153,22 +141,22 @@ static int hwc_prepare_primary(hwc_composer_device_1 *dev,
         hwc_display_contents_1_t *list) {
     hwc_context_t* ctx = (hwc_context_t*)(dev);
     const int dpy = HWC_DISPLAY_PRIMARY;
-    int ret = -1;
     if(UNLIKELY(!ctx->mBasePipeSetup))
         setupBasePipe(ctx);
     if (LIKELY(list && list->numHwLayers > 1) &&
             ctx->dpyAttr[dpy].isActive) {
         reset_layer_prop(ctx, dpy, list->numHwLayers - 1);
         setListStats(ctx, list, dpy);
-        if((ret = ctx->mMDPComp[dpy]->prepare(ctx, list)) < 0) {
+        if(ctx->mMDPComp[dpy]->prepare(ctx, list) < 0) {
             const int fbZ = 0;
             ctx->mFBUpdate[dpy]->prepare(ctx, list, fbZ);
-        }
 
-        // Use Copybit, when Full/Partial MDP comp fails
-        // (only for 8960 which has  dedicated 2D core)
-        if((ret < 1) && (ctx->mSocId == NON_PRO_8960_SOC_ID) && ctx->mCopyBit[dpy])
-            ctx->mCopyBit[dpy]->prepare(ctx, list, dpy);
+            // Use Copybit, when MDP comp fails
+            // (only for 8960 which has  dedicated 2D core)
+            if( (ctx->mSocId == NON_PRO_8960_SOC_ID) &&
+                                       ctx->mCopyBit[dpy])
+                ctx->mCopyBit[dpy]->prepare(ctx, list, dpy);
+        }
     }
     return 0;
 }
@@ -177,7 +165,6 @@ static int hwc_prepare_external(hwc_composer_device_1 *dev,
         hwc_display_contents_1_t *list) {
     hwc_context_t* ctx = (hwc_context_t*)(dev);
     const int dpy = HWC_DISPLAY_EXTERNAL;
-    int ret = -1;
 
     if (LIKELY(list && list->numHwLayers > 1) &&
             ctx->dpyAttr[dpy].isActive &&
@@ -186,15 +173,25 @@ static int hwc_prepare_external(hwc_composer_device_1 *dev,
         if(!ctx->dpyAttr[dpy].isPause) {
            ctx->dpyAttr[dpy].isConfiguring = false;
            setListStats(ctx, list, dpy);
-           if((ret = ctx->mMDPComp[dpy]->prepare(ctx, list)) < 0) {
+           if(ctx->mMDPComp[dpy]->prepare(ctx, list) < 0) {
               const int fbZ = 0;
               ctx->mFBUpdate[dpy]->prepare(ctx, list, fbZ);
-           }
-           // Use Copybit, when Full/Partial MDP comp fails
-           // (only for 8960 which has  dedicated 2D core)
-           if((ret < 1) && (ctx->mSocId == NON_PRO_8960_SOC_ID) && ctx->mCopyBit[dpy] &&
+              // Use Copybit, when MDP comp fails
+              // (only for 8960 which has  dedicated 2D core)
+              if((ctx->mSocId == NON_PRO_8960_SOC_ID) &&
+                                   ctx->mCopyBit[dpy] &&
                  !ctx->listStats[dpy].isDisplayAnimating)
-                ctx->mCopyBit[dpy]->prepare(ctx, list, dpy);
+                    ctx->mCopyBit[dpy]->prepare(ctx, list, dpy);
+           }
+
+            if(ctx->listStats[dpy].isDisplayAnimating) {
+                // Mark all app layers as HWC_OVERLAY for external during
+                // animation, so that SF doesnt draw it on FB
+                for(int i = 0 ;i < ctx->listStats[dpy].numAppLayers; i++) {
+                    hwc_layer_1_t *layer = &list->hwLayers[i];
+                    layer->compositionType = HWC_OVERLAY;
+                }
+            }
         } else {
             /* External Display is in Pause state.
              * Mark all application layers as OVERLAY so that
@@ -225,6 +222,15 @@ static int hwc_prepare_virtual(hwc_composer_device_1 *dev,
             if(ctx->mMDPComp[dpy]->prepare(ctx, list) < 0) {
                 const int fbZ = 0;
                 ctx->mFBUpdate[dpy]->prepare(ctx, list, fbZ);
+            }
+
+            if(ctx->listStats[dpy].isDisplayAnimating) {
+                // Mark all app layers as HWC_OVERLAY for virtual during
+                // animation, so that SF doesnt draw it on FB
+                for(int i = 0 ;i < ctx->listStats[dpy].numAppLayers; i++) {
+                    hwc_layer_1_t *layer = &list->hwLayers[i];
+                    layer->compositionType = HWC_OVERLAY;
+                }
             }
         } else {
             /* Virtual Display is in Pause state.
@@ -311,6 +317,8 @@ static int hwc_eventControl(struct hwc_composer_device_1* dev, int dpy,
             if(dpy == HWC_DISPLAY_PRIMARY) {
                 Locker::Autolock _l(ctx->mDrawLock);
                 // store the primary display orientation
+                // will be used in hwc_video::configure to disable
+                // rotation animation on external display
                 ctx->deviceOrientation = enable;
             }
             break;
@@ -677,8 +685,6 @@ static int hwc_set(hwc_composer_device_1 *dev,
     CALC_FPS();
     MDPComp::resetIdleFallBack();
     //Was locked at the beginning of prepare
-    //Composition cycle is complete signal all waiting threads
-    ctx->mDrawLock.signal();
     ctx->mDrawLock.unlock();
     return ret;
 }
